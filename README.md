@@ -66,5 +66,9 @@ Let’s see an example with Leonardo DaVinci’s The Last Supper:
 
 ![Great Wave](docs/intel_dpt_model.png "")
 
+# DinoV2
+This model is a lot more advanced when it comes to getting depth info, it can get subtle details like the individual shapes and table details. This model is not publically available, and can only be accessed via a demo page from Meta.
+
+![Great Wave](docs/dino_v2.png "")
 
 
