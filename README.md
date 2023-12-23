@@ -13,7 +13,7 @@ Z-axis.
 Depth maps provide depth info for each pixel in the image.
 
 ## Original image
-![alt text](Docs/Mona_Lisa/Original.jpg "Mona Lisa")
+![Great Wave](/Docs/Great_Wave.jpg "Great Wave")
  
 ## Depth map
 The map presents the picture's world in terms of depth from the viewer. Mt. Fuji at the center of the image is clearly further away from the viewer than the waves. This is very useful information about the picture. There are a few options when it comes to getting depth maps from monocular images, and we prototyped with two models that are described below.
