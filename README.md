@@ -42,5 +42,29 @@ We start off by keeping the X & Y axis of the image to maintain its dimension in
 
 ![Great Wave](docs/second_xy_image.png "")
 
+We then assign height to the pixel in 3D space according to the color of the pixel in 2D space. This will allow the 3D model to represent the depth of the pixel.
+
+![Great Wave](docs/third_xy_image.png "")
+
+What we have done here is convert the 2D depth map into a 3D model of the image. So a white pixel is taller than gray ones, which in turn is taller than the black pixel. The taller the pixel, the closer it appears/feels to the observer.
+In real images, the neighboring pixels usually have similar heights, giving the overall model a smooth feel.The edges in depth/features pop out and provide tactile feedback about object boundaries to a user.
+This 3D model can be saved as an STL file and 3D printed to get a real tactile display. The Great Wave off Kanagawa looks like this in a 3D model:
+
+![Great Wave](docs/3dprint.png "")
+
+As you can see, the wave has depth and can be sensed by feeling the image. This is the key idea of our tactile displays.
+
+# Further reading about depth maps 
+
+## Models for getting depth maps
+
+### intel/dpt-large
+Model available as a HuggingFace transformer and we have a prototype that gets depth maps from it.
+Let’s see an example with Leonardo DaVinci’s The Last Supper:
+
+![Great Wave](docs/last_supper.png "")
+
+![Great Wave](docs/intel_dpt_model.png "")
+
 
 
