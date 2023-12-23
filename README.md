@@ -13,4 +13,12 @@ Depth maps provide depth info for each pixel in the image.
 ## Original image
 ![Great Wave](docs/great_wave.png "Great Wave")
 
+## Depth map
+![Great Wave](docs/depth_map.png "Depth Map")
+
+The map presents the picture's world in terms of depth from the viewer. Mt. Fuji at the center of
+the image is clearly further away from the viewer than the waves. This is very useful information
+about the picture. There are a few options when it comes to getting depth maps from monocular images, and we
+prototyped with two models that are described below.
+
 
