@@ -13,10 +13,13 @@ Z-axis.
 Depth maps provide depth info for each pixel in the image.
 
 ## Original image
-![Great Wave](/Docs/Great_Wave.jpg "Great Wave")
+![Great Wave](docs/Great_Wave.jpg "Great Wave")
  
 ## Depth map
 The map presents the picture's world in terms of depth from the viewer. Mt. Fuji at the center of the image is clearly further away from the viewer than the waves. This is very useful information about the picture. There are a few options when it comes to getting depth maps from monocular images, and we prototyped with two models that are described below.
+
+![Alt Text](docs/depth_map.jpg "Depth Map")
+
 
 # Adding features into a depth map
 The challenge with depth maps is that you lose more subtle features of the image. In the case of the Great Wave depth map, it has lost details about the boat and the foam from the wave. For a lot of famous paintings, these features are critical to the perception of the picture. Think Mona Lisa’s smile. Showing just the depth map, while better than nothing, isn’t enough to do justice to the quality of paintings. We need to find a way to bring back the details of the image.
