@@ -28,4 +28,19 @@ One way to do so is to bring in the edges and contours of the image. We can use 
 
 ![Great Wave](docs/canny.png "Canny edge")
 
+As you can see, many of the key features of the image are included here. It does not have depth info, so it cannot be used by itself in a 3D model of the image. For this, we need to combine the depth map with the edges feature map. Here is an example of combination at a 90:10 ratio:
+
+![Great Wave](docs/combined.png "Combined")
+
+# Converting depth-maps to STLs
+Now that we have a full featured depth map, our next task is to convert it into a 3D model that can be rendered via a 3D printer or a robotic tactile display. For this, we need to convert the depth info in each 2D pixel of the image to height on the Z-axis of the 3D model.
+We start with the depth map image, where each pixel contains a color representation of the depth of that pixel in the image’s world. In the example below, a white pixel means that the pixel is closer to the viewer, black means it is further away, and the grays are somewhere in between.
+
+![Great Wave](docs/first_xy_image.png "")
+
+We start off by keeping the X & Y axis of the image to maintain its dimension in the 3D model. Think of this as the base of the 3D frame.
+
+![Great Wave](docs/second_xy_image.png "")
+
+
 
