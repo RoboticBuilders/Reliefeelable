@@ -11,6 +11,6 @@ Our approach to getting 3D models from paintings is straightforward and includes
 Depth maps provide depth info for each pixel in the image.
 
 ## Original image
-![Great Wave](docs/Great_Wave.jpg "Great Wave")
+![Great Wave](docs/great_wave.jpg "Great Wave")
 
 
