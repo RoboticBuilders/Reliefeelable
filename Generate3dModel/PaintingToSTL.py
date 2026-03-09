@@ -3,6 +3,7 @@ import math
 
 import cv2
 import numpy as np
+from scipy.ndimage import gaussian_filter1d
 from PIL import Image
 import torch
 from stl import mesh
@@ -12,7 +13,7 @@ from skimage.restoration import denoise_tv_chambolle
 ## Parameters
 
 # Point to the image that you want to process
-imgName = 'D:\Documents\Reliefeelable\Images\Bright_Unity.jpg'
+imgName = 'D:\Documents\Reliefeelable\Images\starry_Night.jpeg'
 
 # Set to true to auto resize the image to target pixel count. Else, will use the resolution of the original image.
 autoResize = True
@@ -33,7 +34,9 @@ bilateralSigmaSpace = 75
 cannyThreshold1 = 120
 cannyThreshold2 = 240
 cannyGaussianBlur = 3
-cannyBlendWeight = 0.35   # weight of Canny edges in composite (0 = depth only, 1 = edges only)
+cannyBlendWeight = 0.25   # weight of Canny edges in composite (0 = depth only, 1 = edges only)
+cannyLineSmoothSigma = 5  # Gaussian sigma for smoothing contour coordinates (higher = smoother curves)
+cannyLineThickness = 1    # anti-aliased line thickness when redrawing smoothed contours
 
 # Total Variation denoising strength (higher = smoother surface). Range 0.05 - 0.15 recommended.
 tvWeight = 0.1
@@ -42,11 +45,15 @@ tvWeight = 0.1
 maxDepthMM = 10          # maximum relief height in mm
 baseThicknessMM = 0.5   # minimum base plate thickness in mm
 pixelSizeMM = 0.66      # physical width/height of one pixel in mm
-stlSubsample = 4        # use every Nth pixel for mesh (4 = 16x fewer vertices; simpler STL)
+stlSubsample = 2        # use every Nth pixel for mesh (2 = 4x fewer vertices; good detail/size balance)
 maxPrintSizeMM = 230    # scale STL so footprint fits within this size (mm); e.g. 230 = 23cm for 25cm bed
+# Pre-STL heightmap smoothing: reduces edge roughness and flattens wavy background
+stlSmoothBilateralD = 9
+stlSmoothBilateralSigmaColor = 1.0   # height difference threshold [0,1]; flattens similar-height regions
+stlSmoothBilateralSigmaSpace = 20       # spatial blur; smooths edge height variation
 
 # Set to True to show intermediate images and pause for user confirmation between steps.
-interactive = True
+interactive = False
 
 ## Auto-detect device
 
@@ -162,11 +169,48 @@ def save_thermal(depth_map, filepath):
 
 
 def run_canny_edges(bgr_img, threshold1, threshold2, blur_size):
-    """Canny edge detection. Returns float64 [0,1] edge map (edges = 1)."""
+    """Canny edge detection. Returns uint8 binary edge map (0 or 255)."""
     gray = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (blur_size, blur_size), 0)
     edges = cv2.Canny(blurred, threshold1=threshold1, threshold2=threshold2)
-    return (edges.astype(np.float64) / 255.0)
+    return edges
+
+
+def smooth_canny_edges(edge_map, sigma=3, thickness=2):
+    """
+    Smooth jagged Canny edges into pencil-stroke-like curves.
+    Finds contours, smooths each contour's x/y coordinates with a 1D Gaussian,
+    and redraws them anti-aliased onto a clean canvas.
+    Returns float64 [0,1] smooth edge map.
+    """
+    h, w = edge_map.shape
+    # Dilate slightly to connect nearby fragments before finding contours
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    connected = cv2.dilate(edge_map, kernel, iterations=1)
+
+    contours, _ = cv2.findContours(connected, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
+
+    canvas = np.zeros((h, w), dtype=np.uint8)
+
+    for contour in contours:
+        pts = contour.squeeze()
+        if pts.ndim != 2 or len(pts) < 5:
+            continue
+
+        xs = pts[:, 0].astype(np.float64)
+        ys = pts[:, 1].astype(np.float64)
+
+        # Gaussian smooth the coordinate sequences
+        xs_smooth = gaussian_filter1d(xs, sigma=sigma, mode='nearest')
+        ys_smooth = gaussian_filter1d(ys, sigma=sigma, mode='nearest')
+
+        smooth_pts = np.column_stack([xs_smooth, ys_smooth]).astype(np.int32)
+
+        # Draw anti-aliased polyline
+        cv2.polylines(canvas, [smooth_pts], isClosed=False, color=255,
+                       thickness=thickness, lineType=cv2.LINE_AA)
+
+    return canvas.astype(np.float64) / 255.0
 
 
 def run_depth_anything_v2(pil_img):
@@ -196,6 +240,20 @@ def merge_depth_and_canny(depth_norm, canny_norm, canny_weight):
     """
     composite = (1.0 - canny_weight) * depth_norm + canny_weight * canny_norm
     return normalize(composite)
+
+
+def smooth_heightmap_for_stl(heightmap, d=9, sigma_color=0.08, sigma_space=9):
+    """
+    Smooth the heightmap before STL: reduces edge roughness and flattens wavy
+    background. Uses bilateral filter so large height steps (edges) are preserved
+    while small variations (noise, waviness) are smoothed.
+    heightmap: [0,1] float array. Returns normalized [0,1] float array.
+    """
+    h, w = heightmap.shape
+    # OpenCV bilateralFilter expects 8u or 32f; use float32, sigmaColor in [0,1] range
+    img = np.clip(heightmap, 0, 1).astype(np.float32)
+    smoothed = cv2.bilateralFilter(img, d=d, sigmaColor=sigma_color, sigmaSpace=sigma_space)
+    return normalize(smoothed.astype(np.float64))
 
 
 def save_heightmap_stl(depth_map, filepath, pixel_size_mm, max_height_mm, base_thickness_mm, subsample=1, max_print_size_mm=None):
@@ -365,18 +423,23 @@ show_and_confirm("Step 3: Depth Estimation", [
     ("Depth Anything V2", da_norm),
 ])
 
-# 4. Canny edge detection and composite with depth
+# 4. Canny edge detection, smooth lines, and composite with depth
 print("Running Canny edge detection...")
-canny_edges = run_canny_edges(denoised_bgr, cannyThreshold1, cannyThreshold2, cannyGaussianBlur)
-canny_resized = cv2.resize(canny_edges, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
-save_depth_as_image(canny_resized, os.path.join(folder, "Step4_Canny.jpeg"))
+canny_raw = run_canny_edges(denoised_bgr, cannyThreshold1, cannyThreshold2, cannyGaussianBlur)
+save_depth_as_image(canny_raw.astype(np.float64) / 255.0, os.path.join(folder, "Step4_Canny_Raw.jpeg"))
+
+print("Smoothing Canny edges...")
+canny_smooth = smooth_canny_edges(canny_raw, sigma=cannyLineSmoothSigma, thickness=cannyLineThickness)
+canny_resized = cv2.resize(canny_smooth, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+save_depth_as_image(canny_resized, os.path.join(folder, "Step4_Canny_Smooth.jpeg"))
 
 composite = merge_depth_and_canny(da_norm, canny_resized, cannyBlendWeight)
 save_depth_as_image(composite, os.path.join(folder, "Step4_Composite.jpeg"))
 
 show_and_confirm("Step 4: Canny + Depth Composite", [
     ("Depth", da_norm),
-    ("Canny", canny_resized),
+    ("Canny Raw", canny_raw.astype(np.float64) / 255.0),
+    ("Canny Smooth", canny_resized),
     ("Composite", composite),
 ])
 
@@ -392,17 +455,26 @@ show_and_confirm("Step 5: TV Denoising", [
     ("After (smoothed)", smoothed),
 ])
 
-# 6. Export to STL (simplified mesh via subsampling)
+# 6. Smooth heightmap for STL (edge + background smoothing), then export
+print("Smoothing heightmap for STL (edges and background)...")
+stl_heightmap = smooth_heightmap_for_stl(
+    smoothed,
+    d=stlSmoothBilateralD,
+    sigma_color=stlSmoothBilateralSigmaColor,
+    sigma_space=stlSmoothBilateralSigmaSpace,
+)
+save_depth_as_image(stl_heightmap, os.path.join(folder, "Step6_Heightmap_Smoothed.jpeg"))
+
 if not createComposite:
     stl_path = os.path.join(folder, "Step6_Model.stl")
-    save_heightmap_stl(smoothed, stl_path, pixelSizeMM, maxDepthMM, baseThicknessMM, subsample=stlSubsample, max_print_size_mm=maxPrintSizeMM)
+    save_heightmap_stl(stl_heightmap, stl_path, pixelSizeMM, maxDepthMM, baseThicknessMM, subsample=stlSubsample, max_print_size_mm=maxPrintSizeMM)
 else:
-    mid_y, mid_x = smoothed.shape[0] // 2, smoothed.shape[1] // 2
+    mid_y, mid_x = stl_heightmap.shape[0] // 2, stl_heightmap.shape[1] // 2
     quadrants = {
-        "TopLeft":     smoothed[:mid_y, :mid_x],
-        "TopRight":    smoothed[:mid_y, mid_x:],
-        "BottomLeft":  smoothed[mid_y:, :mid_x],
-        "BottomRight": smoothed[mid_y:, mid_x:],
+        "TopLeft":     stl_heightmap[:mid_y, :mid_x],
+        "TopRight":    stl_heightmap[:mid_y, mid_x:],
+        "BottomLeft":  stl_heightmap[mid_y:, :mid_x],
+        "BottomRight": stl_heightmap[mid_y:, mid_x:],
     }
     for name, quad in quadrants.items():
         quad_img_path = os.path.join(folder, f"Step6_{name}.jpeg")
