@@ -2,7 +2,7 @@ import os
 import cv2
 import numpy as np
 import math
-from transformers import DPTFeatureExtractor, DPTForDepthEstimation
+from transformers import DPTImageProcessor, DPTForDepthEstimation
 from PIL import Image
 import torch
 from stl import mesh
@@ -10,13 +10,14 @@ from stl import mesh
 ## Parameters
 
 # Point to the image that you want to process
-imgName = 'innovation_project/ImageProcessingUtils/Images/Starry_Night.jpg'
+#imgName = '../Images/Starry_Night.jpg'
+imgName = 'D:\Documents\Reliefeelable\Images\Bright_Unity.jpg'
 
 # Set to true to auto resize the image to target pixel count (default 75000). Else, will use the resolution of the original imag
 autoResize = True
 
 # The first threshold value for the Canny Edge Detection algorithm. 
-threshold1 = 120
+threshold1 = 80
 
 # The second threshold value for the Canny Edge Detection algorithm. 
 threshold2 = 240
@@ -115,11 +116,11 @@ def Resize(img, scale_ratio):
 def DepthMap(image):
 
     # Setup the model
-    feature_extractor = DPTFeatureExtractor.from_pretrained("Intel/dpt-large")
+    image_processor = DPTImageProcessor.from_pretrained("Intel/dpt-large")
     model = DPTForDepthEstimation.from_pretrained("Intel/dpt-large")
 
     # Get the pixel values
-    pixel_values = feature_extractor(image, return_tensors="pt").pixel_values
+    pixel_values = image_processor(images=image, return_tensors="pt").pixel_values
 
     # Generate depth map
     with torch.no_grad():
@@ -187,7 +188,7 @@ def SaveAsThermal(inputFileName, outFileName):
 #   maxHeight: The maximum height of the model. Default is 5mm.
 #   invertHeight: Set to true to invert the height of the model. If true, the farthest parts are higher than the lower ones. Default is false.
 # 
-def SaveAsStl(img, maxHeight = 5, invertHeight = False):
+def SaveAsStl(img, maxHeight = 10, invertHeight = False):
 
     # Normalize the depth
     max = np.max(img)

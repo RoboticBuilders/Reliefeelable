@@ -6,14 +6,13 @@ import numpy as np
 from PIL import Image
 import torch
 from stl import mesh
-import diffusers
 from transformers import pipeline as hf_pipeline
 from skimage.restoration import denoise_tv_chambolle
 
 ## Parameters
 
 # Point to the image that you want to process
-imgName = 'innovation_project/Generate3DModel/Images/Great_Wave.jpeg'
+imgName = 'D:\Documents\Reliefeelable\Images\Bright_Unity.jpg'
 
 # Set to true to auto resize the image to target pixel count. Else, will use the resolution of the original image.
 autoResize = True
@@ -30,21 +29,21 @@ bilateralD = 9
 bilateralSigmaColor = 75
 bilateralSigmaSpace = 75
 
-# Depth map fusion parameters
-fusionAlpha = 0.6       # base weight toward Marigold (detail) vs Depth Anything V2 (structure)
-fusionEdgeBoost = 0.3   # how much DA2 edge regions shift the blend toward DA2
+# Canny edge detection parameters
+cannyThreshold1 = 120
+cannyThreshold2 = 240
+cannyGaussianBlur = 3
+cannyBlendWeight = 0.35   # weight of Canny edges in composite (0 = depth only, 1 = edges only)
 
 # Total Variation denoising strength (higher = smoother surface). Range 0.05 - 0.15 recommended.
 tvWeight = 0.1
 
 # STL export parameters
-maxDepthMM = 5          # maximum relief height in mm
+maxDepthMM = 10          # maximum relief height in mm
 baseThicknessMM = 0.5   # minimum base plate thickness in mm
 pixelSizeMM = 0.66      # physical width/height of one pixel in mm
-
-# Marigold parameters
-marigoldSteps = 4       # inference steps (LCM variant needs only ~4)
-marigoldEnsemble = 5    # ensemble passes for stability on artistic images
+stlSubsample = 4        # use every Nth pixel for mesh (4 = 16x fewer vertices; simpler STL)
+maxPrintSizeMM = 230    # scale STL so footprint fits within this size (mm); e.g. 230 = 23cm for 25cm bed
 
 # Set to True to show intermediate images and pause for user confirmation between steps.
 interactive = True
@@ -52,7 +51,6 @@ interactive = True
 ## Auto-detect device
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
-torch_dtype = torch.float16 if device == "cuda" else torch.float32
 
 ## Processing
 
@@ -106,11 +104,21 @@ def show_and_confirm(title, images):
         scale = max_display_w / combined.shape[1]
         combined = cv2.resize(combined, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
 
-    cv2.imshow(title, combined)
-    cv2.waitKey(1)
+    try:
+        cv2.imshow(title, combined)
+        cv2.waitKey(1)
+    except cv2.error:
+        # OpenCV built without GUI (e.g. opencv-python-headless); save preview to output folder
+        safe_name = "".join(c if c.isalnum() or c in " _-" else "_" for c in title).strip().replace(" ", "_")
+        preview_path = os.path.join(folder, f"preview_{safe_name}.jpeg")
+        cv2.imwrite(preview_path, combined)
+        print(f"(Display not available; preview saved to {preview_path})")
 
     response = input(f"\n[{title}] Press Enter to continue, or type 'q' to quit: ").strip().lower()
-    cv2.destroyAllWindows()
+    try:
+        cv2.destroyAllWindows()
+    except cv2.error:
+        pass
     if response == 'q':
         print("Pipeline aborted by user.")
         raise SystemExit(0)
@@ -153,28 +161,12 @@ def save_thermal(depth_map, filepath):
     cv2.imwrite(filepath, colorized)
 
 
-def run_marigold(pil_img):
-    """Run Marigold depth estimation. Returns a float64 numpy array (H x W)."""
-    print("Loading Marigold model...")
-    pipe = diffusers.MarigoldDepthPipeline.from_pretrained(
-        "prs-eth/marigold-depth-lcm-v1-0",
-        variant="fp16" if device == "cuda" else None,
-        torch_dtype=torch_dtype,
-    ).to(device)
-
-    print("Running Marigold depth estimation...")
-    output = pipe(
-        pil_img,
-        num_inference_steps=marigoldSteps,
-        ensemble_size=marigoldEnsemble,
-    )
-    depth = output.prediction.squeeze().cpu().numpy().astype(np.float64)
-
-    del pipe
-    if device == "cuda":
-        torch.cuda.empty_cache()
-
-    return depth
+def run_canny_edges(bgr_img, threshold1, threshold2, blur_size):
+    """Canny edge detection. Returns float64 [0,1] edge map (edges = 1)."""
+    gray = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (blur_size, blur_size), 0)
+    edges = cv2.Canny(blurred, threshold1=threshold1, threshold2=threshold2)
+    return (edges.astype(np.float64) / 255.0)
 
 
 def run_depth_anything_v2(pil_img):
@@ -197,36 +189,23 @@ def run_depth_anything_v2(pil_img):
     return depth
 
 
-def fuse_depth_maps(marigold_depth, da_depth, target_size):
+def merge_depth_and_canny(depth_norm, canny_norm, canny_weight):
     """
-    Fuse two depth maps using edge-guided blending.
-    target_size: (width, height) tuple for the output resolution.
-    Returns a normalized [0,1] fused depth map.
+    Composite depth map with Canny edges. Both in [0,1].
+    Returns normalized [0,1] composite (edges add relief).
     """
-    w, h = target_size
-
-    marigold_resized = cv2.resize(marigold_depth, (w, h), interpolation=cv2.INTER_CUBIC)
-    da_resized = cv2.resize(da_depth, (w, h), interpolation=cv2.INTER_CUBIC)
-
-    marigold_norm = normalize(marigold_resized)
-    da_norm = normalize(da_resized)
-
-    # Extract edges from DA2 to guide the blend
-    da_edges = np.abs(cv2.Laplacian(da_norm, cv2.CV_64F))
-    da_edges = da_edges / (da_edges.max() + 1e-8)
-
-    # In smooth regions, favor Marigold (alpha high). At structural edges, shift toward DA2.
-    weight = np.clip(fusionAlpha + fusionEdgeBoost * da_edges, 0.0, 1.0)
-    fused = weight * marigold_norm + (1.0 - weight) * da_norm
-
-    return normalize(fused), marigold_norm, da_norm
+    composite = (1.0 - canny_weight) * depth_norm + canny_weight * canny_norm
+    return normalize(composite)
 
 
-def save_heightmap_stl(depth_map, filepath, pixel_size_mm, max_height_mm, base_thickness_mm):
+def save_heightmap_stl(depth_map, filepath, pixel_size_mm, max_height_mm, base_thickness_mm, subsample=1, max_print_size_mm=None):
     """
     Convert a [0,1]-range 2D depth map into an STL mesh using a shared-vertex
-    heightmap grid. Produces top surface, bottom base, and side walls.
+    heightmap grid. subsample > 1 reduces vertices (e.g. 4 = 16x fewer triangles).
     """
+    if subsample > 1:
+        depth_map = depth_map[::subsample, ::subsample].copy()
+        pixel_size_mm = pixel_size_mm * subsample
     h, w = depth_map.shape
     print(f"Generating STL mesh ({w}x{h} = {w*h} vertices)...")
 
@@ -248,6 +227,20 @@ def save_heightmap_stl(depth_map, filepath, pixel_size_mm, max_height_mm, base_t
     top_flat = top_verts.reshape(-1, 3)
     bot_flat = bot_verts.reshape(-1, 3)
     all_verts = np.vstack([top_flat, bot_flat])
+
+    # Scale x,y to fit within max print bed size (e.g. 23cm)
+    if max_print_size_mm is not None and max_print_size_mm > 0:
+        current_x_mm = (w - 1) * pixel_size_mm
+        current_y_mm = (h - 1) * pixel_size_mm
+        scale = min(1.0, max_print_size_mm / (current_x_mm + 1e-9), max_print_size_mm / (current_y_mm + 1e-9))
+        all_verts[:, 0] *= scale
+        all_verts[:, 1] *= scale
+        if scale < 1.0:
+            print(f"Scaled mesh to fit {max_print_size_mm}mm bed: {current_x_mm:.0f}x{current_y_mm:.0f}mm -> {current_x_mm*scale:.0f}x{current_y_mm*scale:.0f}mm")
+
+    # Mirror left-to-right so the print matches the image orientation
+    x_max = all_verts[:, 0].max()
+    all_verts[:, 0] = x_max - all_verts[:, 0]
 
     n_top = h * w  # vertex offset for bottom layer
 
@@ -337,12 +330,10 @@ pil_image = Image.open(imgName).convert("RGB")
 
 scale_ratio = math.sqrt(targetPixelCount / (img.shape[0] * img.shape[1]))
 
-# Save original
-cv2.imwrite(os.path.join(folder, "Original.jpeg"), img)
-
-# Resize
+# Save step 1 outputs
+cv2.imwrite(os.path.join(folder, "Step1_Original.jpeg"), img)
 resized = resize(img, scale_ratio)
-cv2.imwrite(os.path.join(folder, "Resized.jpeg"), resized)
+cv2.imwrite(os.path.join(folder, "Step1_Resized.jpeg"), resized)
 
 pil_resized = resize_pil(pil_image, scale_ratio)
 target_w, target_h = pil_resized.size
@@ -355,7 +346,7 @@ show_and_confirm("Step 1: Loaded & Resized", [
 # 2. Bilateral filter preprocessing
 print("Applying bilateral filter...")
 denoised_bgr = cv2.bilateralFilter(resized, bilateralD, bilateralSigmaColor, bilateralSigmaSpace)
-cv2.imwrite(os.path.join(folder, "Preprocessed.jpeg"), denoised_bgr)
+cv2.imwrite(os.path.join(folder, "Step2_Preprocessed.jpeg"), denoised_bgr)
 
 denoised_pil = Image.fromarray(cv2.cvtColor(denoised_bgr, cv2.COLOR_BGR2RGB))
 
@@ -364,45 +355,47 @@ show_and_confirm("Step 2: Bilateral Filter", [
     ("After", denoised_bgr),
 ])
 
-# 3. Dual depth estimation
-marigold_depth = run_marigold(denoised_pil)
+# 3. Depth Anything V2 only
 da_depth = run_depth_anything_v2(denoised_pil)
+da_depth_resized = cv2.resize(da_depth, (target_w, target_h), interpolation=cv2.INTER_CUBIC)
+da_norm = normalize(da_depth_resized)
+save_depth_as_image(da_norm, os.path.join(folder, "Step3_DepthAnythingV2.jpeg"))
 
 show_and_confirm("Step 3: Depth Estimation", [
-    ("Marigold", normalize(marigold_depth)),
-    ("Depth Anything V2", normalize(da_depth)),
+    ("Depth Anything V2", da_norm),
 ])
 
-# 4. Normalize, resize to common dims, and fuse
-fused, marigold_norm, da_norm = fuse_depth_maps(marigold_depth, da_depth, (target_w, target_h))
+# 4. Canny edge detection and composite with depth
+print("Running Canny edge detection...")
+canny_edges = run_canny_edges(denoised_bgr, cannyThreshold1, cannyThreshold2, cannyGaussianBlur)
+canny_resized = cv2.resize(canny_edges, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+save_depth_as_image(canny_resized, os.path.join(folder, "Step4_Canny.jpeg"))
 
-save_depth_as_image(marigold_norm, os.path.join(folder, "Depth_Marigold.jpeg"))
-save_depth_as_image(da_norm, os.path.join(folder, "Depth_DA2.jpeg"))
-save_depth_as_image(fused, os.path.join(folder, "Depth_Fused.jpeg"))
+composite = merge_depth_and_canny(da_norm, canny_resized, cannyBlendWeight)
+save_depth_as_image(composite, os.path.join(folder, "Step4_Composite.jpeg"))
 
-show_and_confirm("Step 4: Fused Depth Map", [
-    ("Marigold (norm)", marigold_norm),
-    ("DA2 (norm)", da_norm),
-    ("Fused", fused),
+show_and_confirm("Step 4: Canny + Depth Composite", [
+    ("Depth", da_norm),
+    ("Canny", canny_resized),
+    ("Composite", composite),
 ])
 
-# 5. TV denoising for smooth printable surface
+# 5. TV denoising after composite (smooth printable surface)
 print("Applying TV denoising...")
-smoothed = denoise_tv_chambolle(fused, weight=tvWeight)
+smoothed = denoise_tv_chambolle(composite, weight=tvWeight)
 smoothed = normalize(smoothed)
-
-save_depth_as_image(smoothed, os.path.join(folder, "Depth_Smoothed.jpeg"))
-save_thermal(smoothed, os.path.join(folder, "Depth_Thermal.jpeg"))
+save_depth_as_image(smoothed, os.path.join(folder, "Step5_Depth_Smoothed.jpeg"))
+save_thermal(smoothed, os.path.join(folder, "Step5_Depth_Thermal.jpeg"))
 
 show_and_confirm("Step 5: TV Denoising", [
-    ("Before (fused)", fused),
+    ("Before (composite)", composite),
     ("After (smoothed)", smoothed),
 ])
 
-# 6. Export to STL
+# 6. Export to STL (simplified mesh via subsampling)
 if not createComposite:
-    stl_path = os.path.join(folder, "Model.Full.stl")
-    save_heightmap_stl(smoothed, stl_path, pixelSizeMM, maxDepthMM, baseThicknessMM)
+    stl_path = os.path.join(folder, "Step6_Model.stl")
+    save_heightmap_stl(smoothed, stl_path, pixelSizeMM, maxDepthMM, baseThicknessMM, subsample=stlSubsample, max_print_size_mm=maxPrintSizeMM)
 else:
     mid_y, mid_x = smoothed.shape[0] // 2, smoothed.shape[1] // 2
     quadrants = {
@@ -412,9 +405,9 @@ else:
         "BottomRight": smoothed[mid_y:, mid_x:],
     }
     for name, quad in quadrants.items():
-        quad_img_path = os.path.join(folder, f"{name}.jpeg")
+        quad_img_path = os.path.join(folder, f"Step6_{name}.jpeg")
         save_depth_as_image(quad, quad_img_path)
-        stl_path = os.path.join(folder, f"Model.{name}.stl")
-        save_heightmap_stl(quad, stl_path, pixelSizeMM, maxDepthMM, baseThicknessMM)
+        stl_path = os.path.join(folder, f"Step6_Model_{name}.stl")
+        save_heightmap_stl(quad, stl_path, pixelSizeMM, maxDepthMM, baseThicknessMM, subsample=stlSubsample, max_print_size_mm=maxPrintSizeMM)
 
 print("Done.")
